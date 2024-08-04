@@ -9,7 +9,12 @@ pub trait Read {
     fn new() -> Self;
 
     /// Reads all files in the given path, and concatenates them into a single string.
-    fn read_files<P>(&self, root: P) -> String
+    fn read_files<P>(&self, root: P) -> ReadResult
     where
         P: AsRef<Path> + Debug;
+}
+
+pub struct ReadResult {
+    pub content: String,
+    pub file_count: usize,
 }

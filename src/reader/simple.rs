@@ -3,7 +3,7 @@ use std::path::Path;
 
 use tracing::{error, instrument, trace, warn};
 
-use crate::reader::Read;
+use crate::reader::{Read, ReadResult};
 
 #[derive(Debug)]
 pub struct SimpleReader;
@@ -14,11 +14,12 @@ impl Read for SimpleReader {
     }
 
     #[instrument(level = "trace")]
-    fn read_files<P>(&self, root: P) -> String
+    fn read_files<P>(&self, root: P) -> ReadResult
     where
         P: AsRef<Path> + Debug,
     {
-        let mut result = String::new();
+        let mut content = String::new();
+        let mut file_count = 0;
 
         ignore::WalkBuilder::new(root)
             .build()
@@ -34,14 +35,14 @@ impl Read for SimpleReader {
                             );
                         }
                         Some(file_type) if file_type.is_file() => {
-                            // TODO: This is not the best implementation: It will read the whole file into memory – however large the file may be. Find a way to optimize it! (One idea might be to use a BufReader instead of read_to_string().)
-                            let content = std::fs::read_to_string(path);
-                            let content = content.unwrap_or_else(|error| {
+                            let file_content = std::fs::read_to_string(path);
+                            let file_content = file_content.unwrap_or_else(|error| {
                                 error!(?absolute_path, ?error, "Error reading file");
                                 String::new()
                             });
                             trace!(?absolute_path, "Read and concatenated file");
-                            result.push_str(&content);
+                            content.push_str(&file_content);
+                            file_count += 1;
                         }
                         Some(_) => {
                             trace!(?path, extension = ?path.extension(), "Skipping non-file");
@@ -53,7 +54,10 @@ impl Read for SimpleReader {
                 }
             });
 
-        result
+        ReadResult {
+            content,
+            file_count,
+        }
     }
 }
 
@@ -77,11 +81,15 @@ mod tests {
         let reader = SimpleReader::new();
         let result = reader.read_files(root);
 
-        let len = result.len();
+        let len = result.content.len();
         assert!(len > 0);
 
-        tc.validate_result(&result);
+        tc.validate_content(&result.content);
 
-        info!(?len, ?result, "Finished test_read_files");
+        info!(
+            ?len,
+            result = &result.content[..100],
+            "Finished test_read_files"
+        );
     }
 }

@@ -12,11 +12,11 @@ impl TestContext {
         TestContext {}
     }
 
-    pub fn validate_result(&self, result: &str) {
-        assert!(result.contains("mod"));
-        assert!(result.contains("use clap::Parser;"));
-        assert!(result.contains("fn main()"));
-        assert!(result.contains("main.rs"));
-        assert!(result.contains("lib.rs"));
+    pub fn validate_content(&self, content: &str) {
+        assert!(content.contains("mod"));
+        assert!(content.contains("use clap::Parser;"));
+        assert!(content.contains("fn main()"));
+        assert!(content.contains("main.rs"));
+        assert!(content.contains("lib.rs"));
     }
 }

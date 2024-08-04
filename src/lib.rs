@@ -1,6 +1,6 @@
 pub use cli::Cli;
-pub use reader::Read;
 pub use reader::SimpleReader;
+pub use reader::{Read, ReadResult};
 
 mod cli;
 mod reader;
