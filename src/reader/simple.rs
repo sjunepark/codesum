@@ -63,33 +63,16 @@ impl Read for SimpleReader {
 
 #[cfg(test)]
 mod tests {
-    use tracing::info;
-
-    use crate::test_utils::TestContext;
+    use crate::test_utils::{ReaderTester, TestContext};
 
     use super::*;
 
     #[test]
     fn test_read_files() {
-        let tc = TestContext::new();
-
-        let root = Path::new(".");
-        let abs_root = root.canonicalize().unwrap();
-
-        info!(root = ?abs_root, "Starting test_read_files");
-
+        let _ = TestContext::new();
         let reader = SimpleReader::new();
-        let result = reader.read_files(root);
+        let rt = ReaderTester::new(reader);
 
-        let len = result.content.len();
-        assert!(len > 0);
-
-        tc.validate_content(&result.content);
-
-        info!(
-            ?len,
-            result = &result.content[..100],
-            "Finished test_read_files"
-        );
+        rt.test_reader_for_current_crate();
     }
 }
