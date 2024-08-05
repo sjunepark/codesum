@@ -3,12 +3,12 @@ use std::path::Path;
 
 use tracing::{error, instrument, trace, warn};
 
-use crate::reader::{Read, ReadResult};
+use crate::reader::{ReadResult, SyncRead};
 
 #[derive(Debug)]
 pub struct SimpleReader;
 
-impl Read for SimpleReader {
+impl SyncRead for SimpleReader {
     fn new() -> Self {
         SimpleReader
     }

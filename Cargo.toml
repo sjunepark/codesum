@@ -7,21 +7,21 @@ repository = "https://github.com/sjunepark/codesum"
 
 [dependencies]
 clap = { version = "4.5.13", features = ["derive"] }
-tokio = { version = "1.39.2", features = ["fs"] }
+tokio = { version = "1.39.2", features = ["full", "tracing"] }
 anyhow = { version = "1.0.86" }
 walkdir = "2.5.0"
 rayon = "1.10.0"
-log = "0.4.22"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 ignore = "0.4.22"
+crossbeam-channel = "0.5.13"
 
 [dev-dependencies]
 assert_cmd = { version = "2.0.15" }
 predicates = { version = "3.1.2" }
 criterion = "0.5.1"
-tracing-log = "0.2.0"
 aho-corasick = "1.1.3"
+tracing-log = "0.2.0"
 
 [[bin]]
 name = "codesum"

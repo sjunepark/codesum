@@ -1,27 +1,28 @@
 use std::path::Path;
 
+use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
-use crate::Read;
+use crate::SyncRead;
 
-pub struct TestContext;
+pub struct TestContext {}
 
 impl TestContext {
     pub fn new() -> Self {
         tracing_subscriber::fmt()
             .with_env_filter(EnvFilter::from_default_env())
-            .with_test_writer()
             .init();
 
+        debug!("Initialized test context");
         TestContext {}
     }
 }
 
 pub struct ReaderTester<R>(R)
 where
-    R: Read;
+    R: SyncRead;
 
-impl<R: Read> ReaderTester<R> {
+impl<R: SyncRead> ReaderTester<R> {
     pub fn new(reader: R) -> Self {
         ReaderTester(reader)
     }
@@ -34,6 +35,7 @@ impl<R: Read> ReaderTester<R> {
         }
 
         let content = self.0.read_files(".").content;
+        debug!("Read content: {}", content);
 
         assert!(
             !content.is_empty(),

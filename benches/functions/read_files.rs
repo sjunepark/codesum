@@ -4,7 +4,7 @@ use std::path::Path;
 use criterion::Criterion;
 
 use codesum::SimpleReader;
-use codesum::{Read, ReadResult};
+use codesum::{ReadResult, SyncRead};
 
 pub fn criterion_benchmark(c: &mut Criterion) {
     let root = Path::new("..");
