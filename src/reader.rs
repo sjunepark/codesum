@@ -21,7 +21,7 @@ pub trait Read {
 
     async fn read_files<P>(&self, root: P) -> ReadResult
     where
-        P: AsRef<Path> + Debug + Send + Sync + 'static;
+        P: AsRef<Path> + Debug + Send + Sync + Clone + 'static;
 }
 
 pub struct ReadResult {

@@ -13,7 +13,7 @@ impl SyncRead for SimpleReader {
         SimpleReader
     }
 
-    #[instrument(level = "trace")]
+    #[instrument(level = "trace", skip(self))]
     fn read_files<P>(&self, root: P) -> ReadResult
     where
         P: AsRef<Path> + Debug,

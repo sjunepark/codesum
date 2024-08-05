@@ -7,13 +7,73 @@ use tracing::{debug, error, instrument, trace, warn};
 use crate::reader::Read;
 use crate::ReadResult;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AsyncReader {
     files_to_read: FilesToRead,
     strings_to_concat: StringsToConcat,
 }
 
 #[derive(Debug)]
+struct AsyncWalker {
+    files_to_read: FilesToRead,
+}
+
+impl AsyncWalker {
+    fn new(files_to_read: FilesToRead) -> Self {
+        AsyncWalker { files_to_read }
+    }
+
+    /// Recursively walks the directory tree starting from the given root path,
+    /// sending encountered files to the `files_to_read` channel.
+    ///
+    /// This method is implemented to take ownership of `self` because it's designed
+    /// to be spawned as an independent task.
+    #[instrument(level = "trace", skip(self))]
+    async fn walk<P>(self, root: P)
+    where
+        P: AsRef<Path> + Debug + Send + Sync + Clone + 'static,
+    {
+        debug!(?root, "Starting walk");
+        ignore::WalkBuilder::new(root.clone())
+            .build()
+            .for_each(|entry| match entry {
+                Ok(entry) => {
+                    let path = entry.path();
+                    let absolute_path = path.canonicalize().unwrap();
+                    match entry.file_type() {
+                        None => {
+                            warn!(
+                                ?absolute_path,
+                                "Skipping file with file type stdin, which is not supported"
+                            );
+                        }
+                        Some(file_type) if file_type.is_file() => {
+                            trace!(?path, "Sending file to files_to_read channel");
+                            self.files_to_read
+                                .sender
+                                .send(path.to_path_buf())
+                                .unwrap_or_else(|error| {
+                                    error!(
+                                        ?absolute_path,
+                                        ?error,
+                                        "Error sending file to files_to_read channel"
+                                    );
+                                });
+                        }
+                        Some(_) => {
+                            trace!(?path, extension = ?path.extension(), "Skipping non-file");
+                        }
+                    }
+                }
+                Err(error) => {
+                    error!(%error, "Error reading file");
+                }
+            });
+        debug!(?root, "Finished walk");
+    }
+}
+
+#[derive(Debug, Clone)]
 struct Channel<T> {
     sender: crossbeam_channel::Sender<T>,
     receiver: crossbeam_channel::Receiver<T>,
@@ -36,49 +96,15 @@ impl Read for AsyncReader {
         }
     }
 
-    #[instrument(level = "trace")]
+    #[instrument(level = "trace", skip(self))]
     async fn read_files<P>(&self, root: P) -> ReadResult
     where
-        P: AsRef<Path> + Debug + Send + Sync + 'static,
+        P: AsRef<Path> + Debug + Send + Sync + Clone + 'static,
     {
-        let sender = self.files_to_read.sender.clone();
+        let files_to_read = self.files_to_read.clone();
+
         trace!("Spawning walk task");
-        let walk_handle = tokio::spawn(async move {
-            debug!(?root, "Starting walk");
-            ignore::WalkBuilder::new(root)
-                .build()
-                .for_each(|entry| match entry {
-                    Ok(entry) => {
-                        let path = entry.path();
-                        let absolute_path = path.canonicalize().unwrap();
-                        match entry.file_type() {
-                            None => {
-                                warn!(
-                                    ?absolute_path,
-                                    "Skipping file with file type stdin, which is not supported"
-                                );
-                            }
-                            Some(file_type) if file_type.is_file() => {
-                                trace!(?path, "Sending file to files_to_read channel");
-                                sender.send(path.to_path_buf()).unwrap_or_else(|error| {
-                                    error!(
-                                        ?absolute_path,
-                                        ?error,
-                                        "Error sending file to files_to_read channel"
-                                    );
-                                });
-                            }
-                            Some(_) => {
-                                trace!(?path, extension = ?path.extension(), "Skipping non-file");
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        error!(%error, "Error reading file");
-                    }
-                });
-            debug!("Finished walk");
-        });
+        let walk_handle = tokio::spawn(AsyncWalker::new(files_to_read).walk(root.to_owned()));
 
         let receiver = self.files_to_read.receiver.clone();
         let sender = self.strings_to_concat.sender.clone();
