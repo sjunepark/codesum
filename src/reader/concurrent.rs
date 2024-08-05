@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, instrument, trace, warn};
 
@@ -8,92 +9,11 @@ use crate::reader::Read;
 use crate::ReadResult;
 
 #[derive(Debug, Clone)]
-pub struct AsyncReader {
-    files_to_read: FilesToRead,
-    strings_to_concat: StringsToConcat,
-}
-
-#[derive(Debug)]
-struct AsyncWalker {
-    files_to_read: FilesToRead,
-}
-
-impl AsyncWalker {
-    fn new(files_to_read: FilesToRead) -> Self {
-        AsyncWalker { files_to_read }
-    }
-
-    /// Recursively walks the directory tree starting from the given root path,
-    /// sending encountered files to the `files_to_read` channel.
-    ///
-    /// This method is implemented to take ownership of `self` because it's designed
-    /// to be spawned as an independent task.
-    #[instrument(level = "trace", skip(self))]
-    async fn walk<P>(self, root: P)
-    where
-        P: AsRef<Path> + Debug + Send + Sync + Clone + 'static,
-    {
-        debug!(?root, "Starting walk");
-        ignore::WalkBuilder::new(root.clone())
-            .build()
-            .for_each(|entry| match entry {
-                Ok(entry) => {
-                    let path = entry.path();
-                    let absolute_path = path.canonicalize().unwrap();
-                    match entry.file_type() {
-                        None => {
-                            warn!(
-                                ?absolute_path,
-                                "Skipping file with file type stdin, which is not supported"
-                            );
-                        }
-                        Some(file_type) if file_type.is_file() => {
-                            trace!(?path, "Sending file to files_to_read channel");
-                            self.files_to_read
-                                .sender
-                                .send(path.to_path_buf())
-                                .unwrap_or_else(|error| {
-                                    error!(
-                                        ?absolute_path,
-                                        ?error,
-                                        "Error sending file to files_to_read channel"
-                                    );
-                                });
-                        }
-                        Some(_) => {
-                            trace!(?path, extension = ?path.extension(), "Skipping non-file");
-                        }
-                    }
-                }
-                Err(error) => {
-                    error!(%error, "Error reading file");
-                }
-            });
-        debug!(?root, "Finished walk");
-    }
-}
-
-#[derive(Debug, Clone)]
-struct Channel<T> {
-    sender: crossbeam_channel::Sender<T>,
-    receiver: crossbeam_channel::Receiver<T>,
-}
-
-type FilesToRead = Channel<PathBuf>;
-type StringsToConcat = Channel<String>;
+pub struct AsyncReader;
 
 impl Read for AsyncReader {
     fn new() -> Self {
-        let (sender, receiver) = crossbeam_channel::unbounded();
-        let files_to_read = FilesToRead { sender, receiver };
-
-        let (sender, receiver) = crossbeam_channel::unbounded();
-        let strings_to_concat = StringsToConcat { sender, receiver };
-
-        AsyncReader {
-            files_to_read,
-            strings_to_concat,
-        }
+        AsyncReader
     }
 
     #[instrument(level = "trace", skip(self))]
@@ -101,58 +21,17 @@ impl Read for AsyncReader {
     where
         P: AsRef<Path> + Debug + Send + Sync + Clone + 'static,
     {
-        let files_to_read = self.files_to_read.clone();
+        let (files_to_read_sender, files_to_read_receiver) = unbounded();
+        let (strings_to_concat_sender, strings_to_concat_receiver) = unbounded();
 
         trace!("Spawning walk task");
-        let walk_handle = tokio::spawn(AsyncWalker::new(files_to_read).walk(root.to_owned()));
+        let walk_handle = tokio::spawn(walk(root.to_owned(), files_to_read_sender));
 
-        let receiver = self.files_to_read.receiver.clone();
-        let sender = self.strings_to_concat.sender.clone();
-        let read_handle = tokio::spawn(async move {
-            let mut tasks = Vec::new();
+        trace!("Spawning read task");
+        let read_handle =
+            tokio::spawn(read_files(files_to_read_receiver, strings_to_concat_sender));
 
-            while let Ok(path) = receiver.recv() {
-                trace!(?path, "Received file from files_to_read channel");
-                // TODO: Is this multiple clone necessary? Is this a good approach?
-                let sender = sender.clone();
-                let task: JoinHandle<()> = tokio::spawn(async move {
-                    // TODO: This is not logged, meaning that it's not being executed
-                    trace!(?path, "Reading file content");
-                    let file_content = tokio::fs::read_to_string(&path).await;
-                    let file_content = file_content.unwrap_or_else(|error| {
-                        error!(?path, ?error, "Error reading file");
-                        String::new()
-                    });
-                    trace!(?path, "Sending file content to strings_to_concat channel");
-                    sender.send(file_content).unwrap_or_else(|error| {
-                        error!(
-                            ?path,
-                            ?error,
-                            "Error sending file content to strings_to_concat channel"
-                        );
-                    });
-                });
-                tasks.push(task);
-            }
-            debug!("Finished reading files");
-            tasks
-        });
-
-        let receiver = self.strings_to_concat.receiver.clone();
-        let concat_handle = tokio::spawn(async move {
-            let mut content = String::new();
-            let mut file_count = 0;
-
-            while let Ok(file_content) = receiver.recv() {
-                content.push_str(&file_content);
-                file_count += 1;
-            }
-
-            ReadResult {
-                content,
-                file_count,
-            }
-        });
+        let concat_handle = tokio::spawn(concat_strings(strings_to_concat_receiver));
 
         walk_handle.await.unwrap();
         let tasks = read_handle.await.unwrap();
@@ -160,6 +39,112 @@ impl Read for AsyncReader {
             task.await.unwrap();
         }
         concat_handle.await.unwrap()
+    }
+}
+
+/// Recursively walks the directory tree starting from the given root path,
+/// sending encountered files to the `files_to_read` channel.
+///
+/// This function is designed to be spawned as an independent task.
+#[instrument(level = "trace", skip(files_to_read))]
+async fn walk<P>(root: P, files_to_read: Sender<PathBuf>)
+where
+    P: AsRef<Path> + Debug + Clone,
+{
+    debug!(?root, "Starting walk");
+    ignore::WalkBuilder::new(root.clone())
+        .build()
+        .for_each(|entry| match entry {
+            Ok(entry) => {
+                let path = entry.path();
+                let absolute_path = path.canonicalize().unwrap_or_else(|_| {
+                    panic!("Error getting canonical path for {:?}", path);
+                });
+                match entry.file_type() {
+                    None => {
+                        warn!(
+                            ?absolute_path,
+                            "Skipping file with file type stdin, which is not supported"
+                        );
+                    }
+                    Some(file_type) if file_type.is_file() => {
+                        trace!(?path, "Sending file to files_to_read channel");
+                        files_to_read
+                            .send(path.to_path_buf())
+                            .unwrap_or_else(|error| {
+                                error!(
+                                    ?absolute_path,
+                                    ?error,
+                                    "Error sending file to files_to_read channel"
+                                );
+                            });
+                    }
+                    Some(_) => {
+                        trace!(?path, extension = ?path.extension(), "Skipping non-file");
+                    }
+                }
+            }
+            Err(error) => {
+                error!(%error, "Error reading file");
+            }
+        });
+    debug!(?root, "Finished walk");
+}
+
+#[instrument(level = "trace", skip(files_to_read, strings_to_concat))]
+async fn read_files(
+    files_to_read: Receiver<PathBuf>,
+    strings_to_concat: Sender<String>,
+) -> Vec<JoinHandle<()>> {
+    let mut tasks = Vec::new();
+
+    while let Ok(path) = files_to_read.recv() {
+        let sender = strings_to_concat.clone();
+        let task = tokio::spawn(read_file(path, sender));
+        tasks.push(task);
+    }
+    tasks
+}
+
+#[instrument(level = "trace", skip(path, strings_to_concat))]
+async fn read_file(path: PathBuf, strings_to_concat: Sender<String>) {
+    let file_content = tokio::fs::read_to_string(&path).await;
+
+    let absolute_path = path
+        .canonicalize()
+        .unwrap_or_else(|_| panic!("Error getting canonical path for {:?}", path));
+
+    match file_content {
+        Ok(file_content) => {
+            strings_to_concat
+                .send(file_content)
+                .unwrap_or_else(|error| {
+                    error!(
+                        ?absolute_path,
+                        ?error,
+                        "Error sending file content to strings_to_concat channel"
+                    );
+                });
+        }
+        Err(error) => {
+            error!(?absolute_path, ?error, "Error reading file");
+        }
+    }
+}
+
+#[instrument(level = "trace", skip(strings_to_concat))]
+async fn concat_strings(strings_to_concat: Receiver<String>) -> ReadResult {
+    let mut content = String::new();
+    let mut file_count = 0;
+
+    while let Ok(file_content) = strings_to_concat.recv() {
+        content.push_str(&file_content);
+        file_count += 1;
+    }
+
+    ReadResult {
+        content,
+        file_count,
     }
 }
 
