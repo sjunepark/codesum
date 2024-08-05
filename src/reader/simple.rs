@@ -14,7 +14,7 @@ impl SyncRead for SimpleReader {
     }
 
     #[instrument(level = "trace", skip(self))]
-    fn read_files<P>(&self, root: P) -> ReadResult
+    fn aggregate<P>(&self, root: P) -> ReadResult
     where
         P: AsRef<Path> + Debug,
     {
@@ -71,8 +71,10 @@ mod tests {
     fn test_read_files() {
         let _ = TestContext::new();
         let reader = SimpleReader::new();
-        let rt = ReaderTester::new(reader);
+        let content = reader.aggregate(".").content;
 
-        rt.test_reader_for_current_crate();
+        let rt = ReaderTester::new();
+
+        rt.test_for_current_crate(content.as_str());
     }
 }

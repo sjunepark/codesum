@@ -8,6 +8,7 @@ repository = "https://github.com/sjunepark/codesum"
 [dependencies]
 clap = { version = "4.5.13", features = ["derive"] }
 tokio = { version = "1.39.2", features = ["full", "tracing"] }
+async-channel = "2.3.1"
 anyhow = { version = "1.0.86" }
 walkdir = "2.5.0"
 rayon = "1.10.0"

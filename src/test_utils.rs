@@ -3,8 +3,6 @@ use std::path::Path;
 use tracing::debug;
 use tracing_subscriber::EnvFilter;
 
-use crate::SyncRead;
-
 pub struct TestContext {}
 
 impl TestContext {
@@ -18,24 +16,19 @@ impl TestContext {
     }
 }
 
-pub struct ReaderTester<R>(R)
-where
-    R: SyncRead;
+pub struct ReaderTester;
 
-impl<R: SyncRead> ReaderTester<R> {
-    pub fn new(reader: R) -> Self {
-        ReaderTester(reader)
+impl ReaderTester {
+    pub fn new() -> Self {
+        ReaderTester
     }
 
-    pub fn test_reader_for_current_crate(&self) {
+    pub fn test_for_current_crate(&self, content: &str) {
         let root_path = Path::new(".");
         let cargo_toml = root_path.join("Cargo.toml");
         if !(cargo_toml.is_file() && cargo_toml.exists()) {
             panic!("Cargo.toml not found in current directory");
         }
-
-        let content = self.0.read_files(".").content;
-        debug!("Read content: {}", content);
 
         assert!(
             !content.is_empty(),

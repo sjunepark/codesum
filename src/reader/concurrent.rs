@@ -1,8 +1,6 @@
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
-use tokio::task::JoinHandle;
 use tracing::{debug, error, instrument, trace, warn};
 
 use crate::reader::Read;
@@ -17,27 +15,44 @@ impl Read for AsyncReader {
     }
 
     #[instrument(level = "trace", skip(self))]
-    async fn read_files<P>(&self, root: P) -> ReadResult
+    async fn aggregate<P>(&self, root: P) -> ReadResult
     where
         P: AsRef<Path> + Debug + Send + Sync + Clone + 'static,
     {
-        let (files_to_read_sender, files_to_read_receiver) = unbounded();
-        let (strings_to_concat_sender, strings_to_concat_receiver) = unbounded();
+        let (files_to_read_sender_sync, files_to_read_receiver_sync) =
+            crossbeam_channel::unbounded();
+        let (files_to_read_sender, files_to_read_receiver) = async_channel::unbounded();
+        let (strings_to_concat_sender, strings_to_concat_receiver) = async_channel::unbounded();
 
-        trace!("Spawning walk task");
-        let walk_handle = tokio::spawn(walk(root.to_owned(), files_to_read_sender));
+        let walk_handle = tokio::task::spawn_blocking(move || {
+            debug!("Spawning walk task");
+            walk(root.to_owned(), files_to_read_sender_sync)
+        });
 
-        trace!("Spawning read task");
-        let read_handle =
-            tokio::spawn(read_files(files_to_read_receiver, strings_to_concat_sender));
+        let transfer_handle = tokio::spawn(async move {
+            debug!("Spawning transfer_files task");
+            while let Ok(path) = files_to_read_receiver_sync.recv() {
+                files_to_read_sender
+                    .send(path)
+                    .await
+                    .expect("Error sending file from sync to async channel");
+            }
+        });
 
-        let concat_handle = tokio::spawn(concat_strings(strings_to_concat_receiver));
+        let read_handle = tokio::spawn({
+            debug!("Spawning read_files task");
+            read_files(files_to_read_receiver, strings_to_concat_sender)
+        });
 
+        let concat_handle = tokio::spawn({
+            debug!("Spawning concat_strings task");
+            concat_strings(strings_to_concat_receiver)
+        });
+
+        debug!("Waiting for tasks to finish");
         walk_handle.await.unwrap();
-        let tasks = read_handle.await.unwrap();
-        for task in tasks {
-            task.await.unwrap();
-        }
+        transfer_handle.await.unwrap();
+        read_handle.await.unwrap();
         concat_handle.await.unwrap()
     }
 }
@@ -46,12 +61,12 @@ impl Read for AsyncReader {
 /// sending encountered files to the `files_to_read` channel.
 ///
 /// This function is designed to be spawned as an independent task.
-#[instrument(level = "trace", skip(files_to_read))]
-async fn walk<P>(root: P, files_to_read: Sender<PathBuf>)
+#[instrument(level = "debug", skip(files_to_read))]
+fn walk<P>(root: P, files_to_read: crossbeam_channel::Sender<PathBuf>)
 where
     P: AsRef<Path> + Debug + Clone,
 {
-    debug!(?root, "Starting walk");
+    debug!("Start");
     ignore::WalkBuilder::new(root.clone())
         .build()
         .for_each(|entry| match entry {
@@ -88,26 +103,36 @@ where
                 error!(%error, "Error reading file");
             }
         });
-    debug!(?root, "Finished walk");
+    debug!("Start")
 }
 
-#[instrument(level = "trace", skip(files_to_read, strings_to_concat))]
+#[instrument(level = "debug", skip(files_to_read, strings_to_concat))]
 async fn read_files(
-    files_to_read: Receiver<PathBuf>,
-    strings_to_concat: Sender<String>,
-) -> Vec<JoinHandle<()>> {
+    files_to_read: async_channel::Receiver<PathBuf>,
+    strings_to_concat: async_channel::Sender<String>,
+) {
+    debug!("Start");
     let mut tasks = Vec::new();
 
-    while let Ok(path) = files_to_read.recv() {
+    while let Ok(path) = files_to_read.recv().await {
         let sender = strings_to_concat.clone();
-        let task = tokio::spawn(read_file(path, sender));
+        let task = tokio::spawn({
+            debug!(?path, "Spawning read_file task");
+            read_file(path, sender)
+        });
         tasks.push(task);
     }
-    tasks
+
+    debug!("Waiting for tasks to finish");
+    for task in tasks.into_iter() {
+        task.await.unwrap();
+    }
+    debug!("End");
 }
 
-#[instrument(level = "trace", skip(path, strings_to_concat))]
-async fn read_file(path: PathBuf, strings_to_concat: Sender<String>) {
+#[instrument(level = "debug", skip(strings_to_concat))]
+async fn read_file(path: PathBuf, strings_to_concat: async_channel::Sender<String>) {
+    debug!("Start");
     let file_content = tokio::fs::read_to_string(&path).await;
 
     let absolute_path = path
@@ -118,6 +143,7 @@ async fn read_file(path: PathBuf, strings_to_concat: Sender<String>) {
         Ok(file_content) => {
             strings_to_concat
                 .send(file_content)
+                .await
                 .unwrap_or_else(|error| {
                     error!(
                         ?absolute_path,
@@ -130,18 +156,26 @@ async fn read_file(path: PathBuf, strings_to_concat: Sender<String>) {
             error!(?absolute_path, ?error, "Error reading file");
         }
     }
+    debug!("End");
 }
 
-#[instrument(level = "trace", skip(strings_to_concat))]
-async fn concat_strings(strings_to_concat: Receiver<String>) -> ReadResult {
+#[instrument(level = "debug", skip(strings_to_concat))]
+async fn concat_strings(strings_to_concat: async_channel::Receiver<String>) -> ReadResult {
+    debug!("Start");
     let mut content = String::new();
     let mut file_count = 0;
 
-    while let Ok(file_content) = strings_to_concat.recv() {
+    while let Ok(file_content) = strings_to_concat.recv().await {
+        trace!(
+            file_content.len = file_content.len(),
+            file_content,
+            "Received file content"
+        );
         content.push_str(&file_content);
         file_count += 1;
     }
 
+    debug!("End");
     ReadResult {
         content,
         file_count,
@@ -150,11 +184,7 @@ async fn concat_strings(strings_to_concat: Receiver<String>) -> ReadResult {
 
 #[cfg(test)]
 mod tests {
-    use tracing::info;
-
-    use crate::test_utils::TestContext;
-    use crate::SimpleReader;
-    use crate::SyncRead;
+    use crate::test_utils::{ReaderTester, TestContext};
 
     use super::*;
 
@@ -163,14 +193,11 @@ mod tests {
     async fn test_read_files() {
         let _ = TestContext::new();
         trace!("Creating readers");
-        let async_reader = AsyncReader::new();
-        let sync_reader = SimpleReader::new();
+        let reader = AsyncReader::new();
+        let content = reader.aggregate(".").await.content;
 
-        let sync_result = sync_reader.read_files(".").content;
-        info!(?sync_result, "Sync result");
-        let async_result = async_reader.read_files(".").await.content;
-
-        assert_eq!(sync_result, async_result);
+        let rt = ReaderTester::new();
+        rt.test_for_current_crate(&content);
     }
 
     #[tokio::test]

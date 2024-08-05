@@ -32,5 +32,5 @@ where
     P: AsRef<Path> + Debug,
 {
     let sr = SimpleReader::new();
-    sr.read_files(root)
+    sr.aggregate(root)
 }

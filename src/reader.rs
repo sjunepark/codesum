@@ -11,7 +11,7 @@ pub trait SyncRead {
     fn new() -> Self;
 
     /// Reads all files in the given path, and concatenates them into a single string.
-    fn read_files<P>(&self, root: P) -> ReadResult
+    fn aggregate<P>(&self, root: P) -> ReadResult
     where
         P: AsRef<Path> + Debug;
 }
@@ -19,7 +19,7 @@ pub trait SyncRead {
 pub trait Read {
     fn new() -> Self;
 
-    async fn read_files<P>(&self, root: P) -> ReadResult
+    async fn aggregate<P>(&self, root: P) -> ReadResult
     where
         P: AsRef<Path> + Debug + Send + Sync + Clone + 'static;
 }
