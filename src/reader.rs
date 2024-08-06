@@ -19,7 +19,7 @@ pub trait SyncRead {
 pub trait Read {
     fn new() -> Self;
 
-    async fn aggregate<P>(&self, root: P) -> ReadResult
+    fn aggregate<P>(&self, root: P) -> impl std::future::Future<Output = ReadResult> + Send
     where
         P: AsRef<Path> + Debug + Send + Sync + Clone + 'static;
 }
